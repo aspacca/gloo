@@ -1,10 +1,12 @@
 package kubernetes
 
 import (
+	"context"
 	"fmt"
-	"net/url"
-
 	"github.com/solo-io/gloo/projects/gloo/pkg/discovery"
+	"github.com/solo-io/go-utils/contextutils"
+	"github.com/solo-io/solo-kit/pkg/api/v1/clients"
+	"net/url"
 
 	envoyapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	v1 "github.com/solo-io/gloo/projects/gloo/pkg/api/v1"
@@ -28,6 +30,36 @@ func (p *plugin) Resolve(u *v1.Upstream) (*url.URL, error) {
 	kubeSpec, ok := u.UpstreamType.(*v1.Upstream_Kube)
 	if !ok {
 		return nil, nil
+	}
+
+	ctx := context.Background()
+	ctx = contextutils.WithLogger(ctx, "fds")
+
+	opts := clients.WatchOpts{
+		Ctx:         ctx,
+	}
+
+	kubeFactory := func(namespaces []string) KubePluginSharedFactory {
+		return getInformerFactory(ctx, p.kube, namespaces)
+	}
+
+	upstreamsToTrack := v1.UpstreamList{u}
+	watcher, err := newEndpointWatcherForUpstreams(kubeFactory, p.kubeCoreCache, "", upstreamsToTrack, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	listOpts := clients.ListOpts{
+		Ctx:         ctx,
+	}
+
+	endpoints, err := watcher.List("", listOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, endpoint := range endpoints {
+		return url.Parse(fmt.Sprintf("tcp://%v:%v", endpoint.Address, endpoint.Port))
 	}
 
 	return url.Parse(fmt.Sprintf("tcp://%v.%v.svc.cluster.local:%v", kubeSpec.Kube.ServiceName, kubeSpec.Kube.ServiceNamespace, kubeSpec.Kube.ServicePort))
